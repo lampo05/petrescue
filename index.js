@@ -1,10 +1,14 @@
 const express = require('express');
+const multer = require('multer');
+const {
+    Storage
+} = require('@google-cloud/storage');
+const axios = require('axios');
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
 const mysql = require('mysql2');
-const bodyParser = require('body-parser'); // Tambahkan ini
+const bodyParser = require('body-parser');
 require('dotenv').config();
-
 const app = express();
 const PORT = process.env.PORT || 4000;
 
@@ -18,6 +22,12 @@ const db = mysql.createConnection({
     },
 });
 
+const storage = new Storage({
+    projectId: 'pet-rescue-407209',
+    keyFilename: './pet-rescue.json',
+});
+
+
 const jwtSecret = process.env.JWT_SECRET;
 
 db.connect((err) => {
@@ -29,6 +39,36 @@ db.connect((err) => {
         console.log('Nama Database: ', process.env.DB_DATABASE);
     }
 });
+
+
+
+async function listBucket() {
+    const bucketName = 'pet-rescue-407209.appspot.com';
+
+    try {
+        const [files] = await storage.bucket(bucketName).getFiles();
+
+        console.log('Daftar objek dalam bucket:');
+        files.forEach(file => {
+            console.log(file.name);
+        });
+    } catch (err) {
+        console.error('Gagal membaca bucket:', err);
+    }
+}
+
+listBucket();
+
+const storageMulter = multer.memoryStorage();
+const uploadMulter = multer({
+    storage: storageMulter,
+});
+
+app.use(bodyParser.urlencoded({
+    extended: true
+}));
+app.use(express.json());
+
 
 // Middleware untuk memverifikasi token JWT
 function verifyToken(req, res, next) {
@@ -178,7 +218,7 @@ app.post('/login', (req, res) => {
                 email: results[0].email
             },
             jwtSecret, {
-                expiresIn: '1h'
+                expiresIn: '7d'
             }
         );
 
@@ -227,41 +267,42 @@ app.get('/found', (req, res) => {
 });
 
 // Menampilkan detail hewan berdasarkan ID
-app.get('/pet/:id', (req, res) => {
-    const petId = req.params.id;
-    const getPetDetailsQuery = 'SELECT * FROM pets WHERE pet_id = ?';
-    db.query(getPetDetailsQuery, [petId], (err, results) => {
-        if (err) {
-            console.error(err);
-            return res.status(500).json({
-                error: true,
-                message: 'there is an error'
-            });
-        }
-        if (results.length === 0) {
-            return res.status(404).json({
-                error: true,
-                message: 'Pet not found'
-            });
-        }
-        res.json(results[0]);
-    });
-});
+// app.get('/pet/:id', (req, res) => {
+//     const petId = req.params.id;
+//     const getPetDetailsQuery = 'SELECT * FROM pets WHERE pet_id = ?';
+//     db.query(getPetDetailsQuery, [petId], (err, results) => {
+//         if (err) {
+//             console.error(err);
+//             return res.status(500).json({
+//                 error: true,
+//                 message: 'there is an error'
+//             });
+//         }
+//         if (results.length === 0) {
+//             return res.status(404).json({
+//                 error: true,
+//                 message: 'Pet not found'
+//             });
+//         }
+//         res.json(results[0]);
+//     });
+// });
 
 // Pencarian hewan berdasarkan nama
 app.get('/search/:name', (req, res) => {
     const petName = req.params.name;
-    const searchPetsQuery = 'SELECT * FROM pets WHERE pet_name LIKE ?';
+    const searchPetsQuery = 'SELECT * FROM pets WHERE LOWER(pet_name) LIKE LOWER(?)';
     db.query(searchPetsQuery, [`%${petName}%`], (err, results) => {
         if (err) {
             console.error(err);
             return res.status(500).json({
                 error: true,
-                message: 'there is an error'
+                message: 'There is an error'
             });
         }
         res.json(results);
     });
+
 });
 
 // Menampilkan profil pengguna berdasarkan token JWT
@@ -296,83 +337,123 @@ app.get('/profile', verifyToken, (req, res) => {
     });
 });
 
+const predictionEndpoint = 'https://pet-rescue-y3vz2akfrq-et.a.run.app/predict';
 
+// ... (kode lainnya)
+app.put('/report/lost', verifyToken, async (req, res) => {
+    try {
+        console.log('Request Body:', req.body);
 
-// Melaporkan hewan hilang
-app.post('/report/lost', verifyToken, (req, res) => {
-    const {
-        pet_name,
-        type,
-        gender,
-        date_lost_found,
-        description,
-        reward,
-        image_url,
-        province,
-        regency,
-        found_area
-    } = req.body;
+        const {
+            pet_id, // Extract pet_id from the request body
+            pet_name,
+            gender,
+            date_lost_found,
+            reward,
+            province,
+            regency,
+            found_area,
+            email,
+            phone_number
+        } = req.body;
 
-    const userEmail = req.user.email;
+        // Dapatkan user_id berdasarkan email dari token JWT
+        const userId = req.user.user_id;
 
-    // Dapatkan user_id berdasarkan email
-    const getUserIdQuery = 'SELECT user_id FROM users WHERE email = ?';
-    db.query(getUserIdQuery, [userEmail], (err, results) => {
-        if (err) {
-            console.error(err);
-            return res.status(500).json({
-                error: true,
-                message: 'there is an error'
-            });
-        }
-        if (results.length === 0) {
-            return res.status(404).json({
-                error: true,
-                message: 'User not found'
-            });
-        }
-
-        const userId = results[0].user_id;
-
-        const insertLostPetQuery = `
-            INSERT INTO pets (user_id, pet_name, type, gender, date_lost_found, description, reward, image_url, province, regency, found_area)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        // Lakukan pembaruan entri di database
+        const updateLostPetQuery = `
+            UPDATE pets
+            SET
+                pet_name = ?,
+                gender = ?,
+                date_lost_found = ?,
+                reward = ?,
+                province = ?,
+                regency = ?,
+                found_area = ?,
+                email = ?,
+                phone_number = ?
+            WHERE user_id = ? AND pet_id = ?;
         `;
-        db.query(
-            insertLostPetQuery,
-            [userId, pet_name, type, gender, date_lost_found, description, reward, image_url, province, regency, found_area],
-            (err) => {
-                if (err) {
-                    console.error(err);
-                    return res.status(500).json({
-                        error: true,
-                        message: 'there is an error'
-                    });
-                }
-                res.status(201).json({
-                    error: false,
-                    message: 'Lost pet reported successfully'
-                });
-            }
-        );
-    });
+
+        const updateResult = await db.promise().execute(updateLostPetQuery, [
+            pet_name,
+            gender,
+            date_lost_found,
+            reward,
+            province,
+            regency,
+            found_area,
+            email,
+            phone_number,
+            userId,
+            pet_id,
+        ]);
+
+        console.log('Update result:', updateResult);
+
+        res.status(200).json({
+            error: false,
+            message: 'Entri hewan hilang diperbarui dengan sukses'
+        });
+    } catch (error) {
+        console.error('Error processing report/lost:', error);
+        return res.status(500).json({
+            error: true,
+            message: 'Error processing report/lost. Lihat log server untuk rincian.',
+        });
+    }
 });
 
 
-// Melaporkan hewan ditemukan
+
+
+
+
+async function saveToCloudStorage(imageBuffer) {
+    try {
+        const bucketName = 'pet-rescue-407209.appspot.com';
+        const bucket = storage.bucket(bucketName);
+
+        const fileName = `images/${Date.now()}_image.jpg`;
+
+        const file = bucket.file(fileName);
+        await file.save(imageBuffer, {
+            contentType: 'image/jpeg',
+        });
+
+        const fileUrl = `https://storage.googleapis.com/${bucketName}/${fileName}`;
+        return fileUrl;
+    } catch (error) {
+        console.error('Error saving to Cloud Storage:', error);
+        throw error;
+    }
+}
+
+//const upload = multer(); // Set the destination folder for uploaded files
+
 app.post('/report/found', verifyToken, (req, res) => {
     const {
         pet_name,
         type,
         gender,
         date_lost_found,
-        description,
         reward,
         image_url,
         province,
         regency,
-        found_area
+        found_area,
+        email,
+        phone_number
     } = req.body;
+
+    // Check if required fields are present
+    if (!pet_name || !type || !gender || !date_lost_found || !province || !regency || !found_area || !email || !phone_number) {
+        return res.status(400).json({
+            error: true,
+            message: 'Semua kolom yang diperlukan harus diisi.'
+        });
+    }
 
     const userEmail = req.user.email;
 
@@ -383,41 +464,47 @@ app.post('/report/found', verifyToken, (req, res) => {
             console.error(err);
             return res.status(500).json({
                 error: true,
-                message: 'there is an error'
+                message: 'Ada kesalahan pada server'
             });
         }
         if (results.length === 0) {
             return res.status(404).json({
                 error: true,
-                message: 'User not found'
+                message: 'User tidak ditemukan'
             });
         }
 
         const userId = results[0].user_id;
 
-        const insertFoundPetQuery = `
-            INSERT INTO pets (user_id, pet_name, type, gender, date_lost_found, description, reward, image_url, province, regency, found_area)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        const insertLostPetQuery = `
+            INSERT INTO pets (user_id, pet_name, type, gender, date_lost_found,  reward, image_url, province, regency, found_area, email, phone_number)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `;
+
         db.query(
-            insertFoundPetQuery,
-            [userId, pet_name, type, gender, date_lost_found, description, reward, image_url, province, regency, found_area],
-            (err) => {
+            insertLostPetQuery,
+            [userId, pet_name, type, gender, date_lost_found, reward, image_url, province, regency, found_area, email, phone_number],
+            (err, result) => {
                 if (err) {
                     console.error(err);
                     return res.status(500).json({
                         error: true,
-                        message: 'there is an error'
+                        message: 'Ada kesalahan pada server',
+                        errorDetails: err.message
                     });
                 }
+
+                console.log("Insert result:", result);
+
                 res.status(201).json({
                     error: false,
-                    message: 'Found pet reported successfully'
+                    message: 'Hewan ditemukan dilaporkan dengan sukses'
                 });
             }
         );
     });
 });
+
 
 // Menghapus posting hewan berdasarkan ID
 app.delete('/pet/:id', verifyToken, (req, res) => {
